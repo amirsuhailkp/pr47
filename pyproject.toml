@@ -1,0 +1,12 @@
+[project]
+name = "databroker"
+version = "0.1.0"
+description = "Personal Indian stock-market intelligence and alerting system"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
