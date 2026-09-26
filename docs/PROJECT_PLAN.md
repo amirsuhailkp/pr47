@@ -104,6 +104,18 @@ end-to-end path is a better stability signal than more standalone modules.
 - ✅ End-to-end test covering both the delivery-succeeds and delivery-fails-then-retries paths against a real (in-memory) SQLite database
 - ⬜ Still open: real market-data provider adapter, real LLM HTTP transport, real Telegram HTTP transport (all three now have a proven interface + fake-transport test pattern to follow), Alembic migrations, Azure deployment wiring
 
+### Candidate Discovery Engine ✅
+docs §20 — this was the missing piece before: everything up to this point only
+checked symbols the user already named. Now the system can scan the exchange itself.
+- ✅ `NseUniverseProvider` — the real, free, official NSE main-board equity list (~2,600 symbols, SME already excluded since it trades on a separate platform), no API key (`data/providers/nse_universe_provider.py`)
+- ✅ `CandidateDiscoveryEngine` — for each instrument: backfill → price/liquidity/data-quality universe filter (`market/universe/selection.py`) → pattern + event detection (Phase 2) → evidence aggregation into `CandidateEvidence` (never a bare score — every candidate carries its full reasons) (`opportunity/discovery/engine.py`)
+- ✅ `rank_candidates()` — ranks surfaced candidates via the existing explainable `CandidateRankingModel` (reason count vs. risk count, fully transparent contributions) (`opportunity/ranking/rank.py`)
+- ✅ `scripts/discover_candidates.py --strategy {scalping,swing} --limit N --top N` — runnable end-to-end scan
+- ✅ Bug caught and fixed in the process: `SWING_PROFILE.lookback_days` was 180 (calendar days ≈ 120 trading bars), less than `MarketSettings.min_history_days` (250) — real swing discovery would have silently rejected almost everything. Fixed to 400 calendar days.
+- ⬜ Known limitation: `UniverseCandidateStats.history_days_available` is just a bar count, which only means "calendar days of history" for daily bars — for scalping's 5-minute bars it's not a comparable quantity to `MIN_HISTORY_DAYS`. Not yet fixed; scalping discovery works today because 5-minute bar counts happen to exceed 250 well before the "day" semantics matter, but this is coincidental, not correct.
+- ⬜ Scans only the first `--limit` symbols of the universe, not all ~2,600 — a full scan is slow and yfinance-rate-limit-prone for a free setup; a real broker's bulk-quote endpoint would remove this constraint
+- ⬜ Not wired into `RealTimeService`/Telegram yet — this is a batch/manual scan (`scripts/discover_candidates.py`), not a scheduled job sending alerts
+
 ### Strategy profiles ✅
 Two concrete, documented strategies (docs §24 shape) rather than one hard-coded set
 of pattern thresholds — each with its own bar interval, thresholds, and alert cadence:

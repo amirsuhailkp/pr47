@@ -61,7 +61,10 @@ SWING_DEFINITION = StrategyDefinition(
 SWING_PROFILE = StrategyProfile(
     definition=SWING_DEFINITION,
     bar_interval="1d",
-    lookback_days=180,
+    # 400 calendar days -> ~270-280 trading bars after weekends/holidays, comfortably
+    # above MarketSettings.min_history_days (250) — 180 was too tight and would have
+    # silently failed the universe/data-quality filter for most instruments.
+    lookback_days=400,
     momentum_thresholds=MomentumThresholds(),  # codebase defaults, already daily-tuned
     breakout_thresholds=BreakoutThresholds(),
     pullback_thresholds=PullbackThresholds(),

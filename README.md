@@ -124,6 +124,27 @@ Scalping's 5-minute backfill is still yfinance REST data, not live intraday tick
 useful for testing the deterministic logic at that resolution, but not a substitute
 for a real broker's intraday feed (see `docs/PROJECT_PLAN.md`).
 
+## Finding candidates (scanning the exchange, not just named symbols)
+
+`scripts/run_local_test.py` only checks symbols you name. To scan the actual NSE
+universe and surface candidates worth investigating, use:
+
+```bash
+python -m scripts.discover_candidates                              # swing, first 40 symbols
+python -m scripts.discover_candidates --strategy scalping --limit 20
+python -m scripts.discover_candidates --limit 200 --top 15          # scan more, show more
+```
+
+This fetches the real, free NSE main-board equity list (~2,600 symbols, no API key —
+`data/providers/nse_universe_provider.py`), applies the price/liquidity/data-quality
+universe filter to each, runs the chosen strategy's pattern/event detection, and
+prints the ranked candidates with their full reasons and risks — never a bare score.
+
+`--limit` caps how many symbols are actually scanned (one yfinance call per symbol,
+so scanning the full universe is slow and rate-limit-prone on a free setup); raise it
+if you want a wider scan, or wire in a real broker's bulk-quote endpoint later to
+remove this constraint entirely.
+
 ## Running locally
 
 Phase 1 provides configuration loading, domain models, the market-session engine, provider
