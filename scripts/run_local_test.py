@@ -53,6 +53,7 @@ from data.providers.rss_news_provider import RssNewsProvider, httpx_fetch_feed
 from data.providers.yfinance_provider import YFinanceHistoricalProvider, yfinance_fetch
 from data.storage.database import create_db_engine, init_db, make_session_factory
 from data.storage.repositories import AlertRepository
+from intelligence.llm.build import build_llm_router_from_settings
 from intelligence.research.news_synthesis import normalize_news_items
 from market.strategies.profile import StrategyProfile
 from market.strategies.registry import STRATEGIES, get_strategy
@@ -155,14 +156,20 @@ async def main(symbols: list[str], profile: StrategyProfile) -> None:
         chat_id=settings.telegram.chat_id,
         transport=_real_telegram_transport(settings.telegram.bot_token),
     )
+    llm_router = build_llm_router_from_settings(settings.llm)
     service = RealTimeService(
         pipeline=build_pipeline_from_profile(profile),
         alert_repository=alert_repo,
         notifier=notifier,
         delivery_queue=DeliveryQueue(),
+        llm_router=llm_router,
     )
 
     print(f"Strategy: {profile.definition.name}")
+    print(
+        "LLM enrichment: "
+        + (f"ON ({', '.join(p.name for p in llm_router.providers)})" if llm_router else "OFF (no GROQ_API_KEYS/CEREBRAS_API_KEYS set — deterministic alerts only)")
+    )
     print(f"Backfilling NIFTY 50 index context via yfinance ({profile.bar_interval} bars)...")
     market_index = await _fetch_index_snapshot(historical_provider, profile)
     print(f"NIFTY50 change: {market_index.change_pct:+.2f}%")

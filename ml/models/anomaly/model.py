@@ -49,6 +49,26 @@ class AnomalyModel:
             feature_schema=feature_schema, means=means, stds=stds, sample_size=len(training_features)
         )
 
+    def to_dict(self) -> dict:
+        """Plain-JSON serialization so a trained model survives a process restart
+        (e.g. an Azure redeploy) without needing a database migration — see
+        ml/registry/persistence.py."""
+        return {
+            "feature_schema": list(self.feature_schema),
+            "means": self.means,
+            "stds": self.stds,
+            "sample_size": self.sample_size,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AnomalyModel":
+        return cls(
+            feature_schema=tuple(data["feature_schema"]),
+            means=dict(data["means"]),
+            stds=dict(data["stds"]),
+            sample_size=int(data["sample_size"]),
+        )
+
     def score(self, features: dict[str, float]) -> AnomalyScore:
         per_feature_z: dict[str, float] = {}
         for key in self.feature_schema:

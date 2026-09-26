@@ -68,6 +68,15 @@ class TelegramSettings(BaseSettings):
 
 class AlertSettings(BaseSettings):
     cooldown_seconds: int = Field(default=900, alias="ALERT_COOLDOWN_SECONDS")
+    poll_interval_seconds: int = Field(default=300, alias="POLL_INTERVAL_SECONDS")
+    """How often scripts/run_service.py checks the watchlist while the market is
+    open. 300s (5 min) balances timeliness against yfinance rate limits on a free
+    setup — lower it for scalping, raise it for swing."""
+    retrain_interval_days: int = Field(default=30, alias="RETRAIN_INTERVAL_DAYS")
+    """How often scripts/run_service.py re-runs the anomaly model trainer
+    automatically (ml/training/anomaly_trainer_job.py). Pure local computation, no
+    LLM calls — safe to run unattended on Azure. Set to 0 to disable auto-retraining
+    and only train by running scripts/train_anomaly_model.py yourself."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
