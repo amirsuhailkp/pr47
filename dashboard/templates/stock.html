@@ -6,6 +6,9 @@
   <title>{{ symbol }} — DataBroker</title>
   {% include "_base_style.html" %}
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3/build/global/luxon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.js"></script>
 </head>
 <body>
   <a class="backlink" href="/">&larr; Watchlist</a>
@@ -24,8 +27,22 @@
 
     <div class="card">
       <h3>Price &amp; volume</h3>
-      <canvas id="priceChart" height="100"></canvas>
+      <canvas id="priceChart" height="140"></canvas>
       <canvas id="volumeChart" height="60" style="margin-top:8px"></canvas>
+      <p class="muted" id="chartFallbackNote" style="display:none">
+        Candlestick view didn't load (plugin unreachable) — showing a plain close-price line instead.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Hybrid analysis</h3>
+      <p class="muted">
+        Combines a live ML anomaly score, a local backtest of this stock's own history, and an
+        LLM read of both plus recent news. Computed fresh on click (cached 15 min) — never run
+        automatically, since this page is public and each run costs a real LLM call.
+      </p>
+      <button id="analyzeBtn" onclick="runAnalysis()">Analyze {{ symbol }}</button>
+      <div id="analysisResult" style="margin-top:14px"></div>
     </div>
 
     <div class="card">
@@ -63,21 +80,122 @@
 
     <script>
       const labels = {{ chart_data.labels|tojson }};
-      const closes = {{ chart_data.closes|tojson }};
+      const ohlc = {{ chart_data.ohlc|tojson }};
       const volumes = {{ chart_data.volumes|tojson }};
-      new Chart(document.getElementById('priceChart'), {
-        type: 'line',
-        data: { labels, datasets: [{ label: 'Close', data: closes, borderColor: '#7ab8ff',
-                 backgroundColor: 'rgba(122,184,255,0.08)', fill: true, pointRadius: 0, tension: 0.15 }] },
-        options: { scales: { x: { display: false }, y: { ticks: { color: '#9aa0a6' } } },
-                   plugins: { legend: { display: false } } }
-      });
+      const closes = {{ chart_data.closes|tojson }};
+
+      try {
+        if (typeof Chart.registry.getController('candlestick') === 'undefined') throw new Error('no candlestick controller');
+        new Chart(document.getElementById('priceChart'), {
+          type: 'candlestick',
+          data: {
+            datasets: [{
+              label: '{{ symbol }}',
+              data: labels.map((label, i) => ({ x: new Date(label).getTime(), o: ohlc[i].o, h: ohlc[i].h, l: ohlc[i].l, c: ohlc[i].c })),
+            }],
+          },
+          options: {
+            scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: '#9aa0a6' } },
+                      y: { ticks: { color: '#9aa0a6' } } },
+            plugins: { legend: { display: false } },
+          },
+        });
+      } catch (e) {
+        document.getElementById('chartFallbackNote').style.display = 'block';
+        new Chart(document.getElementById('priceChart'), {
+          type: 'line',
+          data: { labels, datasets: [{ label: 'Close', data: closes, borderColor: '#7ab8ff',
+                   backgroundColor: 'rgba(122,184,255,0.08)', fill: true, pointRadius: 0, tension: 0.15 }] },
+          options: { scales: { x: { display: false }, y: { ticks: { color: '#9aa0a6' } } },
+                     plugins: { legend: { display: false } } },
+        });
+      }
+
       new Chart(document.getElementById('volumeChart'), {
         type: 'bar',
         data: { labels, datasets: [{ label: 'Volume', data: volumes, backgroundColor: '#3a3f4a' }] },
         options: { scales: { x: { display: false }, y: { ticks: { color: '#9aa0a6' } } },
                    plugins: { legend: { display: false } } }
       });
+
+      async function runAnalysis() {
+        const btn = document.getElementById('analyzeBtn');
+        const out = document.getElementById('analysisResult');
+        btn.disabled = true;
+        btn.textContent = 'Analyzing…';
+        out.innerHTML = '<p class="muted">Running ML backtest + LLM read — usually a few seconds…</p>';
+        try {
+          const res = await fetch('/stock/{{ symbol }}/analyze', { method: 'POST' });
+          const data = await res.json();
+          btn.disabled = false;
+          btn.textContent = 'Re-analyze {{ symbol }}';
+          if (data.error && !data.llm) {
+            out.innerHTML = `<p class="muted">${data.error}</p>`;
+          }
+          renderAnalysis(data, out);
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = 'Analyze {{ symbol }}';
+          out.innerHTML = '<p class="muted">Analysis request failed — try again.</p>';
+        }
+      }
+
+      function pct(x) { return x === null || x === undefined ? '—' : (x * 100).toFixed(0) + '%'; }
+      function num(x, d) { return x === null || x === undefined ? '—' : x.toFixed(d === undefined ? 2 : d); }
+
+      function renderAnalysis(data, out) {
+        let html = '';
+        if (data.from_cache) html += `<p class="muted">Cached from ${new Date(data.computed_at).toLocaleTimeString()} — click again after 15 min for a fresh run.</p>`;
+
+        html += '<h4 style="margin-bottom:4px">Live ML signal</h4>';
+        if (data.anomaly_z !== null && data.anomaly_z !== undefined) {
+          html += `<p>Anomaly z-score: <strong>${num(data.anomaly_z)}</strong> `
+                + `(today's move vs this stock's own recent typical day — |z| ≥ 2.5 is unusual, ≥ 3.5 quite unusual)</p>`;
+          if (data.anomaly_contributors && data.anomaly_contributors.length) {
+            html += '<p class="muted">Contributors: ' + data.anomaly_contributors.map(c => `${c[0]}=${num(c[1])}`).join(', ') + '</p>';
+          }
+        } else {
+          html += '<p class="muted">Not enough bar history yet to compute an anomaly score.</p>';
+        }
+
+        html += '<h4 style="margin:14px 0 4px">Local historical backtest</h4>';
+        if (data.historical) {
+          html += `<p class="muted">Based on ${data.historical.sample_size} past day(s) this stock showed a confirmed "${data.historical_family}" pattern:</p>`;
+          html += '<ul class="plain">';
+          for (const [horizon, hs] of Object.entries(data.historical.horizons)) {
+            if (hs.sample_size === 0) continue;
+            html += `<li><strong>${horizon}</strong>: n=${hs.sample_size}, positive ${pct(hs.positive_frequency)} / negative ${pct(hs.negative_frequency)}, `
+                  + `median return ${num(hs.median_return_pct)}%`
+                  + (hs.uncertainty_note ? ` — <span class="muted">${hs.uncertainty_note}</span>` : '')
+                  + '</li>';
+          }
+          html += '</ul>';
+        } else {
+          html += '<p class="muted">No confirmed pattern right now, or not enough matching days in this stock\'s own history yet — nothing to compare against.</p>';
+        }
+
+        html += `<h4 style="margin:14px 0 4px">LLM read</h4>`;
+        if (data.llm) {
+          html += `<p>${data.llm.summary}</p>`;
+          if (data.llm.possible_scenarios.length) {
+            html += '<p class="muted" style="margin-bottom:2px">Possible scenarios:</p><ul class="plain">' + data.llm.possible_scenarios.map(s => `<li>${s}</li>`).join('') + '</ul>';
+          }
+          if (data.llm.risk_factors.length) {
+            html += '<p class="muted" style="margin-bottom:2px">Risk factors:</p><ul class="plain">' + data.llm.risk_factors.map(s => `<li>${s}</li>`).join('') + '</ul>';
+          }
+          if (data.llm.invalidation_conditions.length) {
+            html += '<p class="muted" style="margin-bottom:2px">Would change this view if:</p><ul class="plain">' + data.llm.invalidation_conditions.map(s => `<li>${s}</li>`).join('') + '</ul>';
+          }
+          if (data.llm.uncertainty.length) {
+            html += '<p class="muted" style="margin-bottom:2px">Uncertainty:</p><ul class="plain">' + data.llm.uncertainty.map(s => `<li>${s}</li>`).join('') + '</ul>';
+          }
+          html += `<p class="muted">News items considered: ${data.news_count}${data.used_llm ? '' : ' (deterministic fallback — all LLM providers were unavailable)'}</p>`;
+        } else if (data.error) {
+          html += `<p class="muted">${data.error}</p>`;
+        }
+
+        out.innerHTML = html;
+      }
     </script>
   {% endif %}
 </body>

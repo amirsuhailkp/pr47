@@ -45,7 +45,8 @@ class StockView:
     snapshot: PriceVolumeSnapshot
     context: MarketContext
     active_events: list[str]  # human-readable descriptions, current bar only
-    active_patterns: list[dict]  # {family, confirmed, evidence}
+    active_patterns: list[dict]  # {family, confirmed, evidence} — for display
+    raw_patterns: list  # list[DetectedPattern] — for analysis.py to reuse verbatim
     anomaly_note: str | None
     recent_alerts: list[dict]
 
@@ -73,6 +74,34 @@ def _pattern_engine(profile: StrategyProfile) -> PatternEngine:
             PullbackDetector(profile.pullback_thresholds),
         ]
     )
+
+
+# Public alias — dashboard/analysis.py's local backtest needs to build the identical
+# engine so "was this pattern confirmed on that past day" uses the exact same logic
+# the live chart/alerts use, not a second slightly-different implementation.
+build_pattern_engine = _pattern_engine
+
+
+async def fetch_index_series(
+    provider: YFinanceHistoricalProvider, profile: StrategyProfile
+) -> list[IndexSnapshot]:
+    """Full NIFTY history over the same window as the stock's own bars, one snapshot
+    per trading day — used by dashboard/analysis.py's local backtest to reconstruct
+    what MarketContext looked like on each past day, so pattern confirmation there
+    matches what the live pipeline would have said at the time (no lookahead)."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=profile.lookback_days)
+    bars = await provider.get_bars(NIFTY_INDEX, profile.bar_interval, start, end)
+    snapshots = []
+    for i in range(1, len(bars)):
+        change_pct = (bars[i].close - bars[i - 1].close) / bars[i - 1].close * 100.0 if bars[i - 1].close else 0.0
+        snapshots.append(
+            IndexSnapshot(
+                code="NIFTY50", value=bars[i].close, change=bars[i].close - bars[i - 1].close,
+                change_pct=change_pct, timestamp=bars[i].timestamp, source="yfinance",
+            )
+        )
+    return snapshots
 
 
 async def build_stock_view(
@@ -113,7 +142,7 @@ async def build_stock_view(
 
     return StockView(
         symbol=symbol, bars=bars, snapshot=snapshot, context=context,
-        active_events=active_events, active_patterns=active_patterns,
+        active_events=active_events, active_patterns=active_patterns, raw_patterns=patterns,
         anomaly_note=anomaly_note, recent_alerts=recent_alerts,
     )
 
