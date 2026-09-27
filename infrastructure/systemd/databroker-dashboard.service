@@ -1,0 +1,15 @@
+[Unit]
+Description=DataBroker read-only web dashboard
+After=network.target
+
+[Service]
+# Match the paths your existing databroker.service already uses (adjust the
+# WorkingDirectory/venv path below if your checkout lives somewhere else).
+WorkingDirectory=/home/azureuser/databroker
+ExecStart=/home/azureuser/databroker/.venv/bin/python -m scripts.run_dashboard --port 8080
+Restart=on-failure
+RestartSec=5
+User=azureuser
+
+[Install]
+WantedBy=multi-user.target

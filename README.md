@@ -145,6 +145,37 @@ so scanning the full universe is slow and rate-limit-prone on a free setup); rai
 if you want a wider scan, or wire in a real broker's bulk-quote endpoint later to
 remove this constraint entirely.
 
+## Dashboard (optional, read-only)
+
+[#dashboard-optional-read-only](#dashboard-optional-read-only)
+
+A small web view of the watchlist and per-stock charts/signals, separate from the
+alerting service.
+
+```
+pip install -r requirements.txt   # now includes fastapi/uvicorn/jinja2
+python -m scripts.run_dashboard --port 8080
+```
+
+Then open `http://<vm-public-ip>:8080/`. Design choices, on purpose:
+
+- **Read-only.** It reuses the same free pattern/event/anomaly detectors the live
+  service uses, but never goes through the alert engine — loading a page never
+  writes an alert, never sends Telegram, and doesn't touch the live service's
+  cooldowns.
+- **No LLM calls on page load.** Anything shown as an "AI note" is read from an
+  alert that already fired and was already saved — a page refresh never spends a
+  Groq/Cerebras token. This matters if you run it on a public IP with no login,
+  since anyone with the link could otherwise refresh it and burn your quota.
+- **No auth.** You chose to expose this on the VM's public IP as-is. That means
+  anyone with the link/IP can see your watchlist, prices, and signal history — add a
+  reverse proxy with basic auth (nginx + `htpasswd`) later if that stops being fine.
+  You'll also need an inbound rule for the port in the Azure NSG
+  (Portal → VM → Networking) — the process listening isn't enough by itself.
+- Runs as its own systemd unit, see `infrastructure/systemd/databroker-dashboard.service`
+  (copy it next to your existing `databroker.service`, adjusting paths, then
+  `sudo systemctl enable --now databroker-dashboard`).
+
 ## Running locally
 
 Phase 1 provides configuration loading, domain models, the market-session engine, provider

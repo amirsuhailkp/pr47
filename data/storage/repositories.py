@@ -111,6 +111,29 @@ class AlertRepository:
                 for r in rows
             ]
 
+    def for_symbol(self, symbol: str, limit: int = 20) -> list[dict]:
+        """Alert history for one instrument, most recent first — powers the
+        dashboard's per-stock page. `body` already contains any LLM commentary that
+        was appended at alert time (app/orchestration/realtime_service.py), so this
+        is read-only: it never calls an LLM itself."""
+        with session_scope(self._session_factory) as session:
+            rows = (
+                session.query(AlertRow)
+                .filter_by(symbol=symbol)
+                .order_by(AlertRow.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            return [
+                {
+                    "severity": r.severity,
+                    "title": r.title,
+                    "body": r.body,
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]
+
     def undelivered(self) -> list[int]:
         with session_scope(self._session_factory) as session:
             rows = session.query(AlertRow.id).filter_by(delivered=False).all()

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ symbol }} — DataBroker</title>
+  {% include "_base_style.html" %}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <a class="backlink" href="/">&larr; Watchlist</a>
+  <h1>{{ symbol }}</h1>
+
+  {% if error %}
+    <div class="card"><p class="muted">Couldn't load {{ symbol }}: {{ error }}</p></div>
+  {% else %}
+    <div class="sub">
+      Price {{ "%.2f"|format(view.snapshot.price) }}
+      {% if view.snapshot.price_change_pct is not none %}
+        (<span class="{{ 'up' if view.snapshot.price_change_pct >= 0 else 'down' }}">{{ "%+.2f"|format(view.snapshot.price_change_pct) }}%</span>)
+      {% endif %}
+      · daily bars, deterministic signals recomputed live on this page, no LLM call
+    </div>
+
+    <div class="card">
+      <h3>Price &amp; volume</h3>
+      <canvas id="priceChart" height="100"></canvas>
+      <canvas id="volumeChart" height="60" style="margin-top:8px"></canvas>
+    </div>
+
+    <div class="card">
+      <h3>Current signals</h3>
+      {% if not view.active_events and not view.active_patterns and not view.anomaly_note %}
+        <p class="muted">Nothing unusual detected on the latest bar.</p>
+      {% else %}
+        <ul class="plain">
+          {% for e in view.active_events %}<li>📈 {{ e }}</li>{% endfor %}
+          {% for p in view.active_patterns %}
+            <li>🔎 {{ p.family }}{% if p.confirmed %} (confirmed){% else %} (unconfirmed){% endif %} — {{ p.evidence|join("; ") }}</li>
+          {% endfor %}
+          {% if view.anomaly_note %}<li>🤖 anomaly: {{ view.anomaly_note }}</li>{% endif %}
+        </ul>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Recent alerts</h3>
+      {% if not view.recent_alerts %}
+        <p class="muted">No alerts fired yet for {{ symbol }}.</p>
+      {% else %}
+        <ul class="plain">
+          {% for a in view.recent_alerts %}
+          <li>
+            <span class="badge {{ a.severity }}">{{ a.severity }}</span>
+            <span class="muted">{{ a.created_at.strftime("%b %d, %H:%M") }} UTC</span><br>
+            <strong>{{ a.title }}</strong>
+            <div class="muted" style="white-space:pre-wrap; margin-top:4px">{{ a.body }}</div>
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+
+    <script>
+      const labels = {{ chart_data.labels|tojson }};
+      const closes = {{ chart_data.closes|tojson }};
+      const volumes = {{ chart_data.volumes|tojson }};
+      new Chart(document.getElementById('priceChart'), {
+        type: 'line',
+        data: { labels, datasets: [{ label: 'Close', data: closes, borderColor: '#7ab8ff',
+                 backgroundColor: 'rgba(122,184,255,0.08)', fill: true, pointRadius: 0, tension: 0.15 }] },
+        options: { scales: { x: { display: false }, y: { ticks: { color: '#9aa0a6' } } },
+                   plugins: { legend: { display: false } } }
+      });
+      new Chart(document.getElementById('volumeChart'), {
+        type: 'bar',
+        data: { labels, datasets: [{ label: 'Volume', data: volumes, backgroundColor: '#3a3f4a' }] },
+        options: { scales: { x: { display: false }, y: { ticks: { color: '#9aa0a6' } } },
+                   plugins: { legend: { display: false } } }
+      });
+    </script>
+  {% endif %}
+</body>
+</html>

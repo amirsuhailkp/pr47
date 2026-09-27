@@ -23,6 +23,27 @@ from ml.models.anomaly.model import AnomalyModel
 
 DEFAULT_PATH = Path("data/models/anomaly_production.json")
 
+LAST_ATTEMPT_PATH = Path("data/models/anomaly_last_attempt.txt")
+"""Tracks when a retrain was last *attempted*, independent of whether it was
+promoted. scripts/run_service.py's retrain scheduler used to gate purely on
+DEFAULT_PATH's mtime — fine once a model has ever been promoted, but if promotion
+never succeeds (e.g. a model that never beats its baseline), DEFAULT_PATH never gets
+created, so that gate was always skipped and it retrained on every single poll cycle
+forever instead of once every RETRAIN_INTERVAL_DAYS. This file closes that gap."""
+
+
+def record_retrain_attempt(when: datetime | None = None, path: Path = LAST_ATTEMPT_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text((when or datetime.now(timezone.utc)).isoformat())
+
+
+def days_since_last_attempt(path: Path = LAST_ATTEMPT_PATH) -> float | None:
+    """None means "never attempted" — callers should treat that as due immediately."""
+    if not path.exists():
+        return None
+    last = datetime.fromisoformat(path.read_text().strip())
+    return (datetime.now(timezone.utc) - last).total_seconds() / 86400
+
 
 def save_production_anomaly_model(
     model: AnomalyModel,

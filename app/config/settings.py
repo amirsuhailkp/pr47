@@ -72,11 +72,13 @@ class AlertSettings(BaseSettings):
     """How often scripts/run_service.py checks the watchlist while the market is
     open. 300s (5 min) balances timeliness against yfinance rate limits on a free
     setup — lower it for scalping, raise it for swing."""
-    retrain_interval_days: int = Field(default=30, alias="RETRAIN_INTERVAL_DAYS")
+    retrain_interval_days: int = Field(default=1, alias="RETRAIN_INTERVAL_DAYS")
     """How often scripts/run_service.py re-runs the anomaly model trainer
-    automatically (ml/training/anomaly_trainer_job.py). Pure local computation, no
-    LLM calls — safe to run unattended on Azure. Set to 0 to disable auto-retraining
-    and only train by running scripts/train_anomaly_model.py yourself."""
+    automatically (ml/training/anomaly_trainer_job.py). Pure local computation
+    (fits mean/std features + a baseline comparison, a couple of seconds per
+    watchlist symbol) — no LLM calls, cheap enough to run daily even on a small
+    burstable VM. Set to 0 to disable auto-retraining and only train by running
+    scripts/train_anomaly_model.py yourself."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

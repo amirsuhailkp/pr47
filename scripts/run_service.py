@@ -46,8 +46,8 @@ from intelligence.llm.build import build_llm_router_from_settings
 from market.sessions.nse_calendar import NseSessionCalendar
 from market.strategies.profile import StrategyProfile
 from market.strategies.registry import STRATEGIES, get_strategy
-from ml.registry.persistence import DEFAULT_PATH as ANOMALY_MODEL_PATH
-from ml.registry.persistence import load_production_anomaly_model
+from ml.registry.persistence import days_since_last_attempt, load_production_anomaly_model
+from ml.registry.persistence import record_retrain_attempt
 from ml.training.anomaly_trainer_job import TrainingSkipped, run_training_job
 from scripts.run_local_test import NIFTY_INDEX, _fetch_index_snapshot, _real_telegram_transport
 
@@ -63,10 +63,15 @@ async def _maybe_retrain(
     if retrain_interval_days <= 0:
         return False
 
-    if ANOMALY_MODEL_PATH.exists():
-        age_days = (datetime.now(timezone.utc).timestamp() - ANOMALY_MODEL_PATH.stat().st_mtime) / 86400
-        if age_days < retrain_interval_days:
-            return False
+    age_days = days_since_last_attempt()
+    if age_days is not None and age_days < retrain_interval_days:
+        return False
+
+    # Record the attempt *before* training so a retrain that fails, hangs, or simply
+    # never gets promoted still respects retrain_interval_days on the next cycle —
+    # only successful promotion used to update anything on disk, so an
+    # always-unpromoted model meant this ran on every single poll forever.
+    record_retrain_attempt()
 
     print(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] "
           "retraining anomaly model (scheduled, local compute only, no LLM calls)...")
