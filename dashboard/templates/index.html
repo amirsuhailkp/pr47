@@ -11,13 +11,21 @@
   <div class="sub">Watchlist — strategy: {{ strategy }} · this page is read-only and never sends alerts or calls an LLM</div>
   <p><a href="/discover">&rarr; Scan for potential stocks outside your watchlist</a></p>
 
+  <div style="margin-bottom:16px">
+    <input id="newSymbol" placeholder="e.g. WIPRO" style="background:#171a20; border:1px solid #22252b;
+           color:#e6e6e6; padding:8px 10px; border-radius:6px; margin-right:6px; width:160px">
+    <button onclick="addSymbol()">Add to watchlist</button>
+    <span class="muted" id="addStatus" style="margin-left:10px"></span>
+  </div>
+
   <table>
     <thead>
-      <tr><th>Symbol</th><th>Price</th><th>Change</th><th>Last alert</th></tr>
+      <tr><th>Symbol</th><th>Price</th><th>Change</th><th>Last alert</th><th></th></tr>
     </thead>
-    <tbody>
-      {% for row in rows %}
-      <tr onclick="window.location='/stock/{{ row.symbol }}'" style="cursor:pointer">
+    <tbody id="watchlistBody">
+      {% for item in rows_with_meta %}
+      {% set row = item.row %}
+      <tr>
         <td><a href="/stock/{{ row.symbol }}">{{ row.symbol }}</a></td>
         <td>{{ "%.2f"|format(row.price) if row.price else "—" }}</td>
         <td class="{{ 'up' if row.change_pct and row.change_pct >= 0 else 'down' }}">
@@ -31,9 +39,38 @@
             <span class="muted">none yet</span>
           {% endif %}
         </td>
+        <td>
+          {% if item.removable %}
+            <button onclick="removeSymbol('{{ row.symbol }}')" style="background:#3a1a1a; padding:4px 10px; font-size:0.8rem">Remove</button>
+          {% else %}
+            <span class="muted" style="font-size:0.8rem">from .env</span>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+
+  <script>
+    async function addSymbol() {
+      const input = document.getElementById('newSymbol');
+      const status = document.getElementById('addStatus');
+      const symbol = input.value.trim().toUpperCase();
+      if (!symbol) return;
+      status.textContent = 'Adding…';
+      try {
+        const res = await fetch(`/watchlist/add/${symbol}`, { method: 'POST' });
+        if (res.ok) { window.location.reload(); }
+        else { const data = await res.json(); status.textContent = data.error || 'Failed to add.'; }
+      } catch (e) { status.textContent = 'Failed to add.'; }
+    }
+    async function removeSymbol(symbol) {
+      try {
+        const res = await fetch(`/watchlist/remove/${symbol}`, { method: 'POST' });
+        if (res.ok) { window.location.reload(); }
+        else { const data = await res.json(); alert(data.error || 'Failed to remove.'); }
+      } catch (e) { alert('Failed to remove.'); }
+    }
+  </script>
 </body>
 </html>

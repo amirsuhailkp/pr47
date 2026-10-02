@@ -30,7 +30,7 @@ from opportunity.discovery.engine import CandidateDiscoveryEngine
 from opportunity.ranking.rank import rank_candidates
 from data.providers.yfinance_provider import YFinanceHistoricalProvider, yfinance_fetch
 from data.storage.database import create_db_engine, init_db, make_session_factory
-from data.storage.repositories import AlertRepository
+from data.storage.repositories import AlertRepository, WatchlistRepository
 from intelligence.llm.build import build_llm_router_from_settings
 from market.strategies.registry import get_strategy
 from dashboard.analysis import HybridAnalysis, run_analysis
@@ -46,6 +46,7 @@ _settings = get_settings()
 _engine = create_db_engine(_settings.database.database_url)
 init_db(_engine)
 _alert_repo = AlertRepository(make_session_factory(_engine))
+_watchlist_repo = WatchlistRepository(make_session_factory(_engine))
 _provider = YFinanceHistoricalProvider(yfinance_fetch)
 _profile = get_strategy("swing")  # dashboard always shows the daily/swing view for now
 _llm_router = build_llm_router_from_settings(_settings.llm)  # None if no keys set — handled below
@@ -62,11 +63,44 @@ _discover_cache: dict | None = None  # {"computed_at": datetime, "ranked": [...]
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    symbols = _settings.market.watchlist()
+    env_symbols = set(_settings.market.watchlist())
+    db_symbols = {i.symbol for i in _watchlist_repo.list_active()}
+    symbols = sorted(env_symbols | db_symbols)
     rows = await build_watchlist_overview(symbols, _profile, _provider, _alert_repo)
+    # dashboard-added (removable here) vs env-configured (.env is the source of truth,
+    # so removal for those happens by editing .env, not from this page)
+    rows_with_meta = [
+        {"row": r, "removable": r.symbol in db_symbols and r.symbol not in env_symbols} for r in rows
+    ]
     return templates.TemplateResponse(
-        request, "index.html", {"rows": rows, "strategy": _profile.definition.name}
+        request, "index.html",
+        {"rows_with_meta": rows_with_meta, "strategy": _profile.definition.name},
     )
+
+
+@app.post("/watchlist/add/{symbol}")
+async def watchlist_add(symbol: str) -> JSONResponse:
+    """Adds to the DB-backed watchlist (data/storage/models.py's WatchlistEntryRow /
+    WatchlistRepository — built a while ago, not used by anything until now).
+    scripts/run_service.py now re-reads this table every poll cycle, so this takes
+    effect on the live Telegram-alerting loop too, not just this dashboard — no .env
+    edit or restart needed. It does not touch WATCHLIST_SYMBOLS in .env itself."""
+    symbol = symbol.upper()
+    _watchlist_repo.add(Instrument(symbol=symbol, exchange="NSE"))
+    return JSONResponse({"symbol": symbol, "added": True})
+
+
+@app.post("/watchlist/remove/{symbol}")
+async def watchlist_remove(symbol: str) -> JSONResponse:
+    symbol = symbol.upper()
+    if symbol in set(_settings.market.watchlist()):
+        return JSONResponse(
+            {"error": f"{symbol} is set via WATCHLIST_SYMBOLS in .env — edit .env and restart "
+                      "the service to remove it, the dashboard can't remove env-configured symbols."},
+            status_code=400,
+        )
+    count = _watchlist_repo.deactivate(Instrument(symbol=symbol, exchange="NSE"))
+    return JSONResponse({"symbol": symbol, "removed": count > 0})
 
 
 @app.get("/stock/{symbol}", response_class=HTMLResponse)
@@ -105,6 +139,7 @@ async def stock_page(request: Request, symbol: str, interval: str = "1d") -> HTM
             "volumes": [b.volume for b in chart_bars],
         }
 
+    all_watched = set(_settings.market.watchlist()) | {i.symbol for i in _watchlist_repo.list_active()}
     return templates.TemplateResponse(
         request,
         "stock.html",
@@ -112,6 +147,7 @@ async def stock_page(request: Request, symbol: str, interval: str = "1d") -> HTM
             "symbol": symbol, "view": view, "error": error, "chart_data": chart_data,
             "chart_error": chart_error, "interval": interval,
             "intervals": list(INTERVAL_LOOKBACK_DAYS.keys()),
+            "in_watchlist": symbol in all_watched,
         },
     )
 

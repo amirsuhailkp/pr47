@@ -41,7 +41,7 @@ from alerts.telegram.delivery_queue import DeliveryQueue
 from alerts.telegram.notifier import TelegramNotifier
 from data.providers.yfinance_provider import YFinanceHistoricalProvider, yfinance_fetch
 from data.storage.database import create_db_engine, init_db, make_session_factory
-from data.storage.repositories import AlertRepository
+from data.storage.repositories import AlertRepository, WatchlistRepository
 from intelligence.llm.build import build_llm_router_from_settings
 from market.sessions.nse_calendar import NseSessionCalendar
 from market.strategies.profile import StrategyProfile
@@ -125,6 +125,8 @@ async def main(symbols: list[str], profile: StrategyProfile) -> None:
     engine = create_db_engine(settings.database.database_url)
     init_db(engine)
     alert_repo = AlertRepository(make_session_factory(engine))
+    watchlist_repo = WatchlistRepository(make_session_factory(engine))
+    env_symbols = symbols  # the --symbols/.env list this process was started with
 
     historical_provider = YFinanceHistoricalProvider(yfinance_fetch)
     notifier = TelegramNotifier(
@@ -154,6 +156,18 @@ async def main(symbols: list[str], profile: StrategyProfile) -> None:
     try:
         while True:
             now = datetime.now(timezone.utc)
+
+            # Re-resolve every cycle (not just once at startup) so a symbol added via
+            # the dashboard's "Add to watchlist" button (WatchlistRepository.add —
+            # built a while ago, never wired into this loop until now) gets picked up
+            # on the very next poll, without restarting this service.
+            try:
+                db_symbols = [i.symbol for i in watchlist_repo.list_active()]
+            except Exception as exc:  # noqa: BLE001 — a DB hiccup shouldn't stop alerting
+                print(f"  watchlist DB lookup failed, using env/CLI list only: {exc}")
+                db_symbols = []
+            symbols = sorted(set(env_symbols) | set(db_symbols))
+
             retrained = await _maybe_retrain(
                 symbols, historical_provider, settings.alerts.retrain_interval_days
             )

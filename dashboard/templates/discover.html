@@ -19,6 +19,17 @@
   <div id="scanResult" style="margin-top:16px"></div>
 
   <script>
+    async function addToWatchlist(symbol, btn) {
+      btn.disabled = true;
+      btn.textContent = 'Adding…';
+      try {
+        const res = await fetch(`/watchlist/add/${symbol}`, { method: 'POST' });
+        btn.textContent = res.ok ? 'Added' : 'Failed';
+      } catch (e) {
+        btn.textContent = 'Failed';
+      }
+    }
+
     async function runScan() {
       const btn = document.getElementById('scanBtn');
       const out = document.getElementById('scanResult');
@@ -44,7 +55,10 @@
         } else {
           for (const c of data.candidates) {
             html += `<div class="card">
-              <h3><a href="/stock/${c.symbol}">${c.symbol}</a> <span class="muted">score ${c.score.toFixed(2)}</span></h3>
+              <div style="display:flex; justify-content:space-between; align-items:center">
+                <h3 style="margin:0"><a href="/stock/${c.symbol}">${c.symbol}</a> <span class="muted">score ${c.score.toFixed(2)}</span></h3>
+                <button onclick="addToWatchlist('${c.symbol}', this)" style="font-size:0.8rem; padding:4px 10px">Add to watchlist</button>
+              </div>
               <ul class="plain">${c.reasons.map(r => `<li>+ ${r}</li>`).join('')}</ul>`;
             if (c.risks.length) {
               html += `<ul class="plain">${c.risks.map(r => `<li class="muted">risk: ${r}</li>`).join('')}</ul>`;
