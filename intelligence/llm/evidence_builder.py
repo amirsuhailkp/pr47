@@ -4,6 +4,8 @@ new facts, since everything the LLM sees must trace back to deterministic code.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.domain.history import HistoricalSummary
 from app.domain.llm import StructuredEvidence
 from app.domain.market import Instrument
@@ -38,6 +40,22 @@ def _historical_summary_to_dict(summary: HistoricalSummary) -> dict:
             for h, hs in summary.horizons.items()
         },
     }
+
+
+def _news_item_to_dict(item: dict) -> dict:
+    """RssNewsProvider.get_news() (data/providers/rss_news_provider.py) returns
+    published_at as a real datetime — needed there for the `since` comparison filter.
+    Nothing converted it to a JSON-safe form before this, because nothing actually
+    called build_evidence() with real news items until now: to_payload() just passed
+    self.news straight through, so the first real caller (dashboard/analysis.py) hit
+    a 'datetime is not JSON serializable' error at the HTTP layer, several steps away
+    from the actual cause. Converting here, once, is the correct fix point — this
+    function's whole job is normalizing fields for the LLM."""
+    out = dict(item)
+    published_at = out.get("published_at")
+    if isinstance(published_at, datetime):
+        out["published_at"] = published_at.isoformat()
+    return out
 
 
 def build_evidence(
@@ -76,6 +94,6 @@ def build_evidence(
         historical_cases=(
             _historical_summary_to_dict(historical_summary) if historical_summary else None
         ),
-        news=news or [],
+        news=[_news_item_to_dict(n) for n in (news or [])],
         risk_flags=risk_flags or [],
     )

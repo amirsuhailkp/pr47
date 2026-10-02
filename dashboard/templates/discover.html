@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discover — DataBroker</title>
+  {% include "_base_style.html" %}
+</head>
+<body>
+  <a class="backlink" href="/">&larr; Watchlist</a>
+  <h1>Discover</h1>
+  <div class="sub">
+    Scans the first {{ limit }} NSE symbols for the same setups your watchlist alerts on — this is
+    the existing <code>discover</code> engine, not a new scoring model. Deterministic only, no LLM.
+    Cached {{ cache_minutes }} min between scans.
+  </div>
+
+  <button id="scanBtn" onclick="runScan()">Scan</button>
+  <div id="scanResult" style="margin-top:16px"></div>
+
+  <script>
+    async function runScan() {
+      const btn = document.getElementById('scanBtn');
+      const out = document.getElementById('scanResult');
+      btn.disabled = true;
+      btn.textContent = 'Scanning… (can take a minute, one call per symbol)';
+      out.innerHTML = '';
+      try {
+        const res = await fetch('/discover/scan', { method: 'POST' });
+        const data = await res.json();
+        btn.disabled = false;
+        btn.textContent = 'Re-scan';
+        if (data.error) {
+          out.innerHTML = `<p class="muted">${data.error}</p>`;
+          return;
+        }
+        let html = '';
+        if (data.from_cache) html += `<p class="muted">Cached from ${new Date(data.computed_at).toLocaleTimeString()}.</p>`;
+        html += `<p class="muted">Scanned ${data.stats.scanned} · candidates found ${data.stats.candidates_found} · `
+              + `insufficient history ${data.stats.insufficient_history} · failed filter ${data.stats.failed_universe_filter} · `
+              + `fetch errors ${data.stats.fetch_errors}</p>`;
+        if (data.candidates.length === 0) {
+          html += '<p class="muted">Nothing cleared the filter in this scan.</p>';
+        } else {
+          for (const c of data.candidates) {
+            html += `<div class="card">
+              <h3><a href="/stock/${c.symbol}">${c.symbol}</a> <span class="muted">score ${c.score.toFixed(2)}</span></h3>
+              <ul class="plain">${c.reasons.map(r => `<li>+ ${r}</li>`).join('')}</ul>`;
+            if (c.risks.length) {
+              html += `<ul class="plain">${c.risks.map(r => `<li class="muted">risk: ${r}</li>`).join('')}</ul>`;
+            }
+            html += `</div>`;
+          }
+        }
+        out.innerHTML = html;
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Scan';
+        out.innerHTML = '<p class="muted">Scan failed — try again.</p>';
+      }
+    }
+  </script>
+</body>
+</html>

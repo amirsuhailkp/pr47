@@ -9,6 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/luxon@3/build/global/luxon.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2"></script>
 </head>
 <body>
   <a class="backlink" href="/">&larr; Watchlist</a>
@@ -26,12 +27,27 @@
     </div>
 
     <div class="card">
-      <h3>Price &amp; volume</h3>
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px">
+        <h3 style="margin:0">Price &amp; volume</h3>
+        <div>
+          {% for iv in intervals %}
+            <a href="?interval={{ iv }}"
+               style="padding:4px 10px; border-radius:6px; margin-left:4px; font-size:0.85rem;
+                      {% if iv == interval %}background:#2a6fb8; color:#fff;{% else %}background:#1a1d23; color:#9aa0a6;{% endif %}">
+              {{ iv }}
+            </a>
+          {% endfor %}
+          <button type="button" onclick="window.priceChartInstance && window.priceChartInstance.resetZoom()"
+                  style="margin-left:8px; padding:4px 10px; font-size:0.85rem;">Reset zoom</button>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:6px">Scroll/pinch to zoom, drag to pan. Signals below always use daily data regardless of this view.</p>
       <canvas id="priceChart" height="140"></canvas>
       <canvas id="volumeChart" height="60" style="margin-top:8px"></canvas>
       <p class="muted" id="chartFallbackNote" style="display:none">
         Candlestick view didn't load (plugin unreachable) — showing a plain close-price line instead.
       </p>
+      {% if chart_error %}<p class="muted">{{ chart_error }}</p>{% endif %}
     </div>
 
     <div class="card">
@@ -84,9 +100,19 @@
       const volumes = {{ chart_data.volumes|tojson }};
       const closes = {{ chart_data.closes|tojson }};
 
+      if (window.ChartZoom) Chart.register(window.ChartZoom);
+      else if (window['chartjs-plugin-zoom']) Chart.register(window['chartjs-plugin-zoom']);
+
+      const zoomOptions = {
+        pan: { enabled: true, mode: 'x' },
+        zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+      };
+      const timeUnit = {{ "'minute'" if interval in ("1m","5m","15m") else ("'hour'" if interval == "1h" else "'day'") }};
+
+      let priceChartInstance;
       try {
         if (typeof Chart.registry.getController('candlestick') === 'undefined') throw new Error('no candlestick controller');
-        new Chart(document.getElementById('priceChart'), {
+        priceChartInstance = new Chart(document.getElementById('priceChart'), {
           type: 'candlestick',
           data: {
             datasets: [{
@@ -95,21 +121,22 @@
             }],
           },
           options: {
-            scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: '#9aa0a6' } },
+            scales: { x: { type: 'time', time: { unit: timeUnit }, ticks: { color: '#9aa0a6' } },
                       y: { ticks: { color: '#9aa0a6' } } },
-            plugins: { legend: { display: false } },
+            plugins: { legend: { display: false }, zoom: zoomOptions },
           },
         });
       } catch (e) {
         document.getElementById('chartFallbackNote').style.display = 'block';
-        new Chart(document.getElementById('priceChart'), {
+        priceChartInstance = new Chart(document.getElementById('priceChart'), {
           type: 'line',
           data: { labels, datasets: [{ label: 'Close', data: closes, borderColor: '#7ab8ff',
                    backgroundColor: 'rgba(122,184,255,0.08)', fill: true, pointRadius: 0, tension: 0.15 }] },
           options: { scales: { x: { display: false }, y: { ticks: { color: '#9aa0a6' } } },
-                     plugins: { legend: { display: false } } },
+                     plugins: { legend: { display: false }, zoom: zoomOptions } },
         });
       }
+      window.priceChartInstance = priceChartInstance;
 
       new Chart(document.getElementById('volumeChart'), {
         type: 'bar',

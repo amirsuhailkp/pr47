@@ -66,6 +66,9 @@ async def _fetch_index_snapshot(
     )
 
 
+fetch_index_snapshot = _fetch_index_snapshot  # public alias for dashboard/app.py's discover route
+
+
 def _pattern_engine(profile: StrategyProfile) -> PatternEngine:
     return PatternEngine(
         [
@@ -102,6 +105,28 @@ async def fetch_index_series(
             )
         )
     return snapshots
+
+
+INTERVAL_LOOKBACK_DAYS: dict[str, int] = {
+    "1d": 365, "1h": 59, "15m": 59, "5m": 59, "1m": 7,
+}
+"""Yahoo Finance limits how far back intraday intervals go (roughly 60 days for
+5m/15m/1h, 7 days for 1m) — these are safe defaults per interval, not the strategy
+profile's own lookback_days, which is tuned for daily swing analysis, not for
+rendering a zoomable intraday chart."""
+
+
+async def fetch_chart_bars(
+    symbol: str, interval: str, provider: YFinanceHistoricalProvider
+) -> list[OHLCVBar]:
+    """Bars for the chart only, independent of the swing-profile pattern/anomaly
+    analysis below — picking '5m' here just changes what you can see, not what
+    the signals/backtest are based on."""
+    if interval not in INTERVAL_LOOKBACK_DAYS:
+        raise ValueError(f"unsupported chart interval: {interval}")
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=INTERVAL_LOOKBACK_DAYS[interval])
+    return await provider.get_bars(Instrument(symbol=symbol, exchange="NSE"), interval, start, now)
 
 
 async def build_stock_view(

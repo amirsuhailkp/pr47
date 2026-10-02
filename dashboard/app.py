@@ -21,15 +21,23 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from datetime import timedelta
+
 from app.config.settings import get_settings
 from app.domain.market import Instrument
+from data.providers.nse_universe_provider import NseUniverseProvider, httpx_fetch_csv
+from opportunity.discovery.engine import CandidateDiscoveryEngine
+from opportunity.ranking.rank import rank_candidates
 from data.providers.yfinance_provider import YFinanceHistoricalProvider, yfinance_fetch
 from data.storage.database import create_db_engine, init_db, make_session_factory
 from data.storage.repositories import AlertRepository
 from intelligence.llm.build import build_llm_router_from_settings
 from market.strategies.registry import get_strategy
 from dashboard.analysis import HybridAnalysis, run_analysis
-from dashboard.service import build_pattern_engine, build_stock_view, build_watchlist_overview, fetch_index_series
+from dashboard.service import (
+    INTERVAL_LOOKBACK_DAYS, build_pattern_engine, build_stock_view, build_watchlist_overview,
+    fetch_chart_bars, fetch_index_series, fetch_index_snapshot,
+)
 
 app = FastAPI(title="DataBroker Dashboard")
 templates = Jinja2Templates(directory="dashboard/templates")
@@ -46,6 +54,11 @@ _pattern_engine = build_pattern_engine(_profile)
 _ANALYSIS_CACHE_SECONDS = 900  # 15 min — protects your LLM quota from repeated clicks
 _analysis_cache: dict[str, HybridAnalysis] = {}
 
+_DISCOVER_CACHE_SECONDS = 1800  # 30 min — a scan is ~40 sequential yfinance calls; this
+# keeps a visitor hammering "Scan" from hammering Yahoo on your behalf
+_DISCOVER_DEFAULT_LIMIT = 40  # matches scripts/discover_candidates.py's own default
+_discover_cache: dict | None = None  # {"computed_at": datetime, "ranked": [...]}
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
@@ -57,31 +70,49 @@ async def index(request: Request) -> HTMLResponse:
 
 
 @app.get("/stock/{symbol}", response_class=HTMLResponse)
-async def stock_page(request: Request, symbol: str) -> HTMLResponse:
+async def stock_page(request: Request, symbol: str, interval: str = "1d") -> HTMLResponse:
     symbol = symbol.upper()
+    if interval not in INTERVAL_LOOKBACK_DAYS:
+        interval = "1d"
+
     error: str | None = None
+    chart_error: str | None = None
     view = None
+    chart_bars = []
     try:
         view = await build_stock_view(symbol, _profile, _provider, _alert_repo)
     except Exception as exc:  # noqa: BLE001 — show the error on the page, don't 500
         error = str(exc)
 
-    chart_data = None
+    # Signals/backtest always use the swing (daily) profile's own bars — only the
+    # chart's timeframe changes here, so a "5m" zoomed-in view doesn't change what
+    # the pattern/anomaly/backtest section is reasoning about. Kept as a separate
+    # try/except: Yahoo not having intraday history for a symbol shouldn't blank out
+    # signals that already loaded fine.
     if view is not None:
+        try:
+            chart_bars = view.bars if interval == "1d" else await fetch_chart_bars(symbol, interval, _provider)
+        except Exception as exc:  # noqa: BLE001
+            chart_error = f"Couldn't load {interval} data: {exc}"
+
+    chart_data = None
+    if chart_bars:
+        label_fmt = "%Y-%m-%d" if interval == "1d" else "%Y-%m-%d %H:%M"
         chart_data = {
-            "labels": [b.timestamp.strftime("%Y-%m-%d") for b in view.bars],
-            "ohlc": [
-                {"o": b.open, "h": b.high, "l": b.low, "c": b.close}
-                for b in view.bars
-            ],
-            "closes": [b.close for b in view.bars],
-            "volumes": [b.volume for b in view.bars],
+            "labels": [b.timestamp.strftime(label_fmt) for b in chart_bars],
+            "ohlc": [{"o": b.open, "h": b.high, "l": b.low, "c": b.close} for b in chart_bars],
+            "closes": [b.close for b in chart_bars],
+            "volumes": [b.volume for b in chart_bars],
         }
 
     return templates.TemplateResponse(
         request,
         "stock.html",
-        {"symbol": symbol, "view": view, "error": error, "chart_data": chart_data},
+        {
+            "symbol": symbol, "view": view, "error": error, "chart_data": chart_data,
+            "chart_error": chart_error, "interval": interval,
+            "intervals": list(INTERVAL_LOOKBACK_DAYS.keys()),
+        },
     )
 
 
@@ -108,6 +139,66 @@ async def analyze(symbol: str) -> JSONResponse:
 
     _analysis_cache[symbol] = result
     return JSONResponse(_serialize_analysis(result, from_cache=False))
+
+
+@app.get("/discover", response_class=HTMLResponse)
+async def discover_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "discover.html",
+        {"cache_minutes": _DISCOVER_CACHE_SECONDS // 60, "limit": _DISCOVER_DEFAULT_LIMIT},
+    )
+
+
+@app.post("/discover/scan")
+async def discover_scan() -> JSONResponse:
+    """On-demand, cached — see dashboard/templates/discover.html. Reuses
+    opportunity/discovery/engine.py exactly as scripts/discover_candidates.py does;
+    this doesn't add a new scoring/scanning approach, just a web front end on the
+    existing one."""
+    global _discover_cache
+    now = datetime.now(timezone.utc)
+    if _discover_cache is not None and (now - _discover_cache["computed_at"]).total_seconds() < _DISCOVER_CACHE_SECONDS:
+        return JSONResponse(_serialize_discover(_discover_cache, from_cache=True))
+
+    try:
+        universe_provider = NseUniverseProvider(httpx_fetch_csv)
+        universe = await universe_provider.get_universe()
+        market_index = await fetch_index_snapshot(_provider, _profile)
+
+        engine = CandidateDiscoveryEngine(_provider, _settings.market)
+        start = now - timedelta(days=_profile.lookback_days)
+        result = await engine.discover(
+            universe, _profile, market_index, now, start, max_instruments=_DISCOVER_DEFAULT_LIMIT
+        )
+        ranked = rank_candidates(result.candidates)
+    except Exception as exc:  # noqa: BLE001 — show the error, don't 500
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    _discover_cache = {"computed_at": now, "ranked": ranked, "stats": result.stats}
+    return JSONResponse(_serialize_discover(_discover_cache, from_cache=False))
+
+
+def _serialize_discover(cache: dict, from_cache: bool) -> dict:
+    stats = cache["stats"]
+    return {
+        "from_cache": from_cache,
+        "computed_at": cache["computed_at"].isoformat(),
+        "stats": {
+            "scanned": stats.scanned, "candidates_found": stats.candidates_found,
+            "insufficient_history": stats.insufficient_history,
+            "failed_universe_filter": stats.failed_universe_filter,
+            "fetch_errors": stats.fetch_errors,
+        },
+        "candidates": [
+            {
+                "symbol": rc.evidence.instrument.symbol,
+                "score": rc.score.total,
+                "reasons": list(rc.evidence.reasons),
+                "risks": list(rc.evidence.risks),
+            }
+            for rc in cache["ranked"][:20]
+        ],
+    }
 
 
 def _serialize_analysis(a: HybridAnalysis, from_cache: bool) -> dict:
