@@ -147,6 +147,7 @@ class HybridAnalysis:
     llm_analysis: LLMAnalysis | None
     used_llm: bool
     error: str | None = None
+    routing_events: list[dict] | None = None  # what each provider actually said — see below
 
 
 async def run_analysis(
@@ -189,6 +190,11 @@ async def run_analysis(
         instrument, snapshot, context, patterns, historical_summary=historical, news=news,
         risk_flags=risk_flags,
     )
+    # LLMRouter.analyze() already records WHY each provider failed (bad key, rate
+    # limit, validation error) in its failover_log — it was just never surfaced past
+    # "all LLM providers were unavailable" before. Slice only what this call adds,
+    # since the router instance is long-lived and its log keeps growing.
+    log_start = len(llm_router.failover_log)
     try:
         analysis, used_llm = await llm_router.analyze("stock_analysis", evidence.to_payload())
     except Exception as exc:  # noqa: BLE001 — surface the failure, don't 500 the page
@@ -196,8 +202,12 @@ async def run_analysis(
             instrument.symbol, now, anomaly_z, contributors, historical, family, len(news),
             None, False, error=f"LLM analysis failed: {exc}",
         )
+    routing_events = [
+        {"provider": e.provider_attempted, "outcome": e.outcome, "detail": e.detail}
+        for e in llm_router.failover_log[log_start:]
+    ]
 
     return HybridAnalysis(
         instrument.symbol, now, anomaly_z, contributors, historical, family, len(news),
-        analysis, used_llm,
+        analysis, used_llm, routing_events=routing_events,
     )

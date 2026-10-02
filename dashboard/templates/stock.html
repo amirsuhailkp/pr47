@@ -326,6 +326,12 @@
             html += '<p class="muted" style="margin-bottom:2px">Uncertainty:</p><ul class="plain">' + data.llm.uncertainty.map(s => `<li>${s}</li>`).join('') + '</ul>';
           }
           html += `<p class="muted">News items considered: ${data.news_count}${data.used_llm ? '' : ' (deterministic fallback — all LLM providers were unavailable)'}</p>`;
+          if (!data.used_llm && data.routing_events && data.routing_events.length) {
+            html += '<p class="muted" style="margin-bottom:2px">Why the LLM wasn\'t used (from GROQ_API_KEYS/CEREBRAS_API_KEYS):</p>';
+            html += '<ul class="plain">' + data.routing_events.map(e =>
+              `<li class="muted">${e.provider}: ${e.outcome}${e.detail ? ' — ' + e.detail : ''}</li>`
+            ).join('') + '</ul>';
+          }
         } else if (data.error) {
           html += `<p class="muted">${data.error}</p>`;
         }

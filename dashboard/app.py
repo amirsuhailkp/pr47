@@ -64,18 +64,33 @@ _discover_cache: dict | None = None  # {"computed_at": datetime, "ranked": [...]
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     env_symbols = set(_settings.market.watchlist())
-    db_symbols = {i.symbol for i in _watchlist_repo.list_active()}
+    detailed = _watchlist_repo.list_active_detailed()
+    db_symbols = {d["instrument"].symbol for d in detailed}
+    priority_by_symbol = {d["instrument"].symbol: d["priority"] for d in detailed}
     symbols = sorted(env_symbols | db_symbols)
     rows = await build_watchlist_overview(symbols, _profile, _provider, _alert_repo)
     # dashboard-added (removable here) vs env-configured (.env is the source of truth,
     # so removal for those happens by editing .env, not from this page)
     rows_with_meta = [
-        {"row": r, "removable": r.symbol in db_symbols and r.symbol not in env_symbols} for r in rows
+        {
+            "row": r, "removable": r.symbol in db_symbols and r.symbol not in env_symbols,
+            "priority": priority_by_symbol.get(r.symbol, 0),
+        }
+        for r in rows
     ]
+    rows_with_meta.sort(key=lambda m: (-m["priority"], m["row"].symbol))
     return templates.TemplateResponse(
         request, "index.html",
         {"rows_with_meta": rows_with_meta, "strategy": _profile.definition.name},
     )
+
+
+@app.post("/watchlist/priority/{symbol}")
+async def watchlist_priority(symbol: str, priority: int) -> JSONResponse:
+    symbol = symbol.upper()
+    priority = max(0, min(2, priority))  # 0=Normal, 1=High, 2=Top — clamp bad input
+    _watchlist_repo.set_priority(Instrument(symbol=symbol, exchange="NSE"), priority)
+    return JSONResponse({"symbol": symbol, "priority": priority})
 
 
 @app.post("/watchlist/add/{symbol}")
@@ -265,6 +280,7 @@ def _serialize_analysis(a: HybridAnalysis, from_cache: bool) -> dict:
         "news_count": a.news_count,
         "used_llm": a.used_llm,
         "error": a.error,
+        "routing_events": a.routing_events or [],
         "llm": (
             {
                 "summary": llm.summary,

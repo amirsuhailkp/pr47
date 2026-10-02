@@ -44,6 +44,53 @@ class WatchlistRepository:
                 Instrument(symbol=r.instrument.symbol, exchange=r.instrument.exchange) for r in rows
             ]
 
+    def list_active_detailed(self) -> list[dict]:
+        """Like list_active() but keeps priority/notes — list_active() only returns
+        bare Instruments because scripts/run_service.py (its only caller before now)
+        just needs symbols. The dashboard needs priority too, for sorting/display, so
+        this is a separate method rather than changing list_active()'s return shape
+        and risking breaking that existing caller."""
+        with session_scope(self._session_factory) as session:
+            rows = (
+                session.query(WatchlistEntryRow)
+                .filter_by(active=True)
+                .join(InstrumentRow)
+                .all()
+            )
+            return [
+                {
+                    "instrument": Instrument(symbol=r.instrument.symbol, exchange=r.instrument.exchange),
+                    "priority": r.priority,
+                    "notes": r.notes,
+                }
+                for r in rows
+            ]
+
+    def set_priority(self, instrument: Instrument, priority: int) -> None:
+        """Updates priority on an existing active entry, or creates one if this
+        instrument has no DB watchlist row yet — e.g. it's only in the live watchlist
+        via WATCHLIST_SYMBOLS in .env, which has no priority field of its own."""
+        with session_scope(self._session_factory) as session:
+            instrument_row = (
+                session.query(InstrumentRow)
+                .filter_by(symbol=instrument.symbol, exchange=instrument.exchange)
+                .one_or_none()
+            )
+            if instrument_row is None:
+                instrument_row = InstrumentRow(symbol=instrument.symbol, exchange=instrument.exchange)
+                session.add(instrument_row)
+                session.flush()
+
+            entry = (
+                session.query(WatchlistEntryRow)
+                .filter_by(instrument_id=instrument_row.id, active=True)
+                .one_or_none()
+            )
+            if entry is None:
+                session.add(WatchlistEntryRow(instrument_id=instrument_row.id, priority=priority, active=True))
+            else:
+                entry.priority = priority
+
     def deactivate(self, instrument: Instrument) -> int:
         with session_scope(self._session_factory) as session:
             rows = (
