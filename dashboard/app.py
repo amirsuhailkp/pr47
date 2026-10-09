@@ -15,6 +15,7 @@ Design notes (see dashboard/service.py's module docstring for the fuller reasoni
 """
 from __future__ import annotations
 
+import random
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -55,10 +56,65 @@ _pattern_engine = build_pattern_engine(_profile)
 _ANALYSIS_CACHE_SECONDS = 900  # 15 min — protects your LLM quota from repeated clicks
 _analysis_cache: dict[str, HybridAnalysis] = {}
 
-_DISCOVER_CACHE_SECONDS = 1800  # 30 min — a scan is ~40 sequential yfinance calls; this
-# keeps a visitor hammering "Scan" from hammering Yahoo on your behalf
-_DISCOVER_DEFAULT_LIMIT = 40  # matches scripts/discover_candidates.py's own default
-_discover_cache: dict | None = None  # {"computed_at": datetime, "ranked": [...]}
+_DISCOVER_CACHE_SECONDS = 60  # short cooldown — just stops accidental double-clicks from
+# firing two overlapping scans; each scan now covers different symbols (see below), so a
+# long cache would block the thing re-scanning is actually for: making progress through
+# the universe
+_DISCOVER_DEFAULT_LIMIT = 40
+_DISCOVER_MAX_LIMIT = 300  # a generous ceiling — higher just means a slower single scan
+_discover_cache: dict | None = None  # {"computed_at": datetime, "ranked": [...], "window": str}
+
+# NSE's equity CSV comes back in roughly alphabetical order. The discovery engine's
+# max_instruments just slices the front of whatever list it's given
+# (opportunity/discovery/engine.py: `instruments[:max_instruments]`), so scanning the
+# raw universe repeatedly always hit the same ~40 alphabetically-first tickers
+# (20MICRONS, AAATECH, AAREYDRUGS...) and never touched the other ~2000 symbols on
+# NSE — that's why every scan kept finding the same 1-2 candidates. Fix: shuffle the
+# universe once per process (cached below) and page through it with a cursor, so
+# consecutive scans cover new ground and the whole exchange gets scanned over time
+# instead of the same slice forever.
+_discover_universe: list[Instrument] | None = None
+_discover_universe_fetched_at: datetime | None = None
+_discover_cursor = 0
+_DISCOVER_UNIVERSE_REFRESH_SECONDS = 24 * 3600  # NSE's listing changes rarely; a day is plenty
+
+
+async def _get_shuffled_universe() -> list[Instrument]:
+    global _discover_universe, _discover_universe_fetched_at, _discover_cursor
+    now = datetime.now(timezone.utc)
+    stale = (
+        _discover_universe_fetched_at is None
+        or (now - _discover_universe_fetched_at).total_seconds() > _DISCOVER_UNIVERSE_REFRESH_SECONDS
+    )
+    if _discover_universe is None or stale:
+        universe = await NseUniverseProvider(httpx_fetch_csv).get_universe()
+        random.shuffle(universe)  # breaks the alphabetical clustering, once
+        _discover_universe = universe
+        _discover_universe_fetched_at = now
+        _discover_cursor = 0
+    return _discover_universe
+
+
+def _next_scan_batch(limit: int) -> tuple[list[Instrument], str]:
+    """Returns the next `limit` symbols from the shuffled universe, advancing the
+    cursor (wrapping around once the whole universe has been covered), plus a label
+    describing which slice this was for display."""
+    global _discover_cursor
+    universe = _discover_universe or []
+    n = len(universe)
+    if n == 0:
+        return [], "0 of 0"
+    limit = min(limit, n)
+    end = _discover_cursor + limit
+    if end <= n:
+        batch = universe[_discover_cursor:end]
+    else:
+        batch = universe[_discover_cursor:] + universe[: end - n]
+    window = f"{_discover_cursor + 1}–{min(end, n) if end <= n else n}" + (
+        f" + 1–{end - n}" if end > n else ""
+    )
+    _discover_cursor = end % n
+    return batch, f"{window} of {n}"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -194,38 +250,45 @@ async def analyze(symbol: str) -> JSONResponse:
 
 @app.get("/discover", response_class=HTMLResponse)
 async def discover_page(request: Request) -> HTMLResponse:
+    universe_size = len(_discover_universe) if _discover_universe else None
     return templates.TemplateResponse(
         request, "discover.html",
-        {"cache_minutes": _DISCOVER_CACHE_SECONDS // 60, "limit": _DISCOVER_DEFAULT_LIMIT},
+        {
+            "cache_seconds": _DISCOVER_CACHE_SECONDS, "default_limit": _DISCOVER_DEFAULT_LIMIT,
+            "max_limit": _DISCOVER_MAX_LIMIT, "universe_size": universe_size,
+        },
     )
 
 
 @app.post("/discover/scan")
-async def discover_scan() -> JSONResponse:
-    """On-demand, cached — see dashboard/templates/discover.html. Reuses
+async def discover_scan(limit: int = _DISCOVER_DEFAULT_LIMIT) -> JSONResponse:
+    """On-demand, lightly cached — see dashboard/templates/discover.html. Reuses
     opportunity/discovery/engine.py exactly as scripts/discover_candidates.py does;
     this doesn't add a new scoring/scanning approach, just a web front end on the
-    existing one."""
+    existing one, scanning a different slice of the universe each call (see
+    _next_scan_batch above — fixes repeat scans finding the same few symbols)."""
     global _discover_cache
+    limit = max(1, min(limit, _DISCOVER_MAX_LIMIT))
     now = datetime.now(timezone.utc)
-    if _discover_cache is not None and (now - _discover_cache["computed_at"]).total_seconds() < _DISCOVER_CACHE_SECONDS:
+    if (
+        _discover_cache is not None
+        and (now - _discover_cache["computed_at"]).total_seconds() < _DISCOVER_CACHE_SECONDS
+    ):
         return JSONResponse(_serialize_discover(_discover_cache, from_cache=True))
 
     try:
-        universe_provider = NseUniverseProvider(httpx_fetch_csv)
-        universe = await universe_provider.get_universe()
+        await _get_shuffled_universe()
+        batch, window = _next_scan_batch(limit)
         market_index = await fetch_index_snapshot(_provider, _profile)
 
         engine = CandidateDiscoveryEngine(_provider, _settings.market)
         start = now - timedelta(days=_profile.lookback_days)
-        result = await engine.discover(
-            universe, _profile, market_index, now, start, max_instruments=_DISCOVER_DEFAULT_LIMIT
-        )
+        result = await engine.discover(batch, _profile, market_index, now, start)
         ranked = rank_candidates(result.candidates)
     except Exception as exc:  # noqa: BLE001 — show the error, don't 500
         return JSONResponse({"error": str(exc)}, status_code=500)
 
-    _discover_cache = {"computed_at": now, "ranked": ranked, "stats": result.stats}
+    _discover_cache = {"computed_at": now, "ranked": ranked, "stats": result.stats, "window": window}
     return JSONResponse(_serialize_discover(_discover_cache, from_cache=False))
 
 
@@ -234,6 +297,7 @@ def _serialize_discover(cache: dict, from_cache: bool) -> dict:
     return {
         "from_cache": from_cache,
         "computed_at": cache["computed_at"].isoformat(),
+        "window": cache.get("window", ""),
         "stats": {
             "scanned": stats.scanned, "candidates_found": stats.candidates_found,
             "insufficient_history": stats.insufficient_history,

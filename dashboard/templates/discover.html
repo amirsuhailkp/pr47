@@ -10,15 +10,26 @@
   <a class="backlink" href="/">&larr; Watchlist</a>
   <h1>Discover</h1>
   <div class="sub">
-    Scans the first {{ limit }} NSE symbols for the same setups your watchlist alerts on — this is
-    the existing <code>discover</code> engine, not a new scoring model. Deterministic only, no LLM.
-    Cached {{ cache_minutes }} min between scans.
+    Scans a batch of NSE symbols for the same setups your watchlist alerts on — this is the
+    existing <code>discover</code> engine, not a new scoring model. Deterministic only, no LLM.
+    Each scan moves on to a fresh, unseen slice of the exchange{% if universe_size %} (~{{ universe_size }}
+    symbols total){% endif %}, so repeated scans stop landing on the same couple of stocks.
+    Cached {{ cache_seconds }}s between identical clicks.
   </div>
 
-  <button id="scanBtn" onclick="runScan()">Scan</button>
+  <div style="display:flex; align-items:center; gap:10px; margin-top:10px; flex-wrap:wrap">
+    <label for="scanLimit" class="muted" style="font-size:0.85rem">Symbols per scan</label>
+    <input id="scanLimit" type="number" min="1" max="{{ max_limit }}" value="{{ default_limit }}"
+           style="width:90px; padding:4px 8px">
+    <button id="scanBtn" onclick="runScan()">Scan</button>
+    <span id="windowLabel" class="muted" style="font-size:0.85rem"></span>
+  </div>
+
   <div id="scanResult" style="margin-top:16px"></div>
 
   <script>
+    const MAX_LIMIT = {{ max_limit }};
+
     async function addToWatchlist(symbol, btn) {
       btn.disabled = true;
       btn.textContent = 'Adding…';
@@ -33,25 +44,36 @@
     async function runScan() {
       const btn = document.getElementById('scanBtn');
       const out = document.getElementById('scanResult');
+      const windowLabel = document.getElementById('windowLabel');
+      const limitInput = document.getElementById('scanLimit');
+
+      let limit = parseInt(limitInput.value, 10);
+      if (!Number.isFinite(limit) || limit < 1) limit = {{ default_limit }};
+      if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+      limitInput.value = limit;
+
       btn.disabled = true;
-      btn.textContent = 'Scanning… (can take a minute, one call per symbol)';
+      btn.textContent = 'Scanning… (can take a while, one call per symbol)';
       out.innerHTML = '';
       try {
-        const res = await fetch('/discover/scan', { method: 'POST' });
+        const res = await fetch(`/discover/scan?limit=${limit}`, { method: 'POST' });
         const data = await res.json();
         btn.disabled = false;
-        btn.textContent = 'Re-scan';
+        btn.textContent = 'Scan next batch';
         if (data.error) {
           out.innerHTML = `<p class="muted">${data.error}</p>`;
           return;
         }
+        if (data.window) {
+          windowLabel.textContent = `Scanned symbols ${data.window}` + (data.from_cache ? ' (cached)' : '');
+        }
         let html = '';
-        if (data.from_cache) html += `<p class="muted">Cached from ${new Date(data.computed_at).toLocaleTimeString()}.</p>`;
+        if (data.from_cache) html += `<p class="muted">Cached from ${new Date(data.computed_at).toLocaleTimeString()} — click again shortly for a new batch.</p>`;
         html += `<p class="muted">Scanned ${data.stats.scanned} · candidates found ${data.stats.candidates_found} · `
               + `insufficient history ${data.stats.insufficient_history} · failed filter ${data.stats.failed_universe_filter} · `
               + `fetch errors ${data.stats.fetch_errors}</p>`;
         if (data.candidates.length === 0) {
-          html += '<p class="muted">Nothing cleared the filter in this scan.</p>';
+          html += '<p class="muted">Nothing cleared the filter in this batch — click "Scan next batch" to check a different slice of the exchange.</p>';
         } else {
           for (const c of data.candidates) {
             html += `<div class="card">
